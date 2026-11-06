@@ -1,0 +1,4 @@
+/target/
+/PureMap.app/
+.DS_Store
+*.dSYM/

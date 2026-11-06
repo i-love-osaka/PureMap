@@ -1,0 +1,21 @@
+[package]
+name = "puremap"
+version = "0.1.0"
+edition = "2024"
+description = "A clean, offline-first native mind mapping app"
+license = "MIT"
+authors = ["Mr.Ben"]
+homepage = "https://mrben.net"
+rust-version = "1.85"
+keywords = ["mind-map", "egui", "offline", "desktop"]
+exclude = ["/PureMap.app/**"]
+
+[dependencies]
+eframe = "0.31"
+rfd = "0.15"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+uuid = { version = "1", features = ["v4"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+muda = "0.17"
