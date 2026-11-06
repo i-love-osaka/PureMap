@@ -9,7 +9,7 @@
     <key>CFBundleIconFile</key>
     <string>PureMap</string>
     <key>CFBundleIdentifier</key>
-    <string>com.puremap.app</string>
+    <string>com.mrben.PureMap</string>
     <key>CFBundleInfoDictionaryVersion</key>
     <string>6.0</string>
     <key>CFBundleName</key>
@@ -25,6 +25,14 @@
     <key>CFBundleDocumentTypes</key>
     <array>
         <dict>
+            <key>CFBundleTypeExtensions</key>
+            <array>
+                <string>puremap</string>
+            </array>
+            <key>CFBundleTypeMIMETypes</key>
+            <array>
+                <string>application/x-puremap+json</string>
+            </array>
             <key>CFBundleTypeName</key>
             <string>PureMap Mind Map</string>
             <key>CFBundleTypeRole</key>
@@ -33,7 +41,7 @@
             <string>Owner</string>
             <key>LSItemContentTypes</key>
             <array>
-                <string>com.mrben.puremap</string>
+                <string>com.mrben.PureMapDoc</string>
             </array>
         </dict>
     </array>
@@ -41,7 +49,7 @@
     <array>
         <dict>
             <key>UTTypeIdentifier</key>
-            <string>com.mrben.puremap</string>
+            <string>com.mrben.PureMapDoc</string>
             <key>UTTypeDescription</key>
             <string>PureMap Mind Map</string>
             <key>UTTypeConformsTo</key>

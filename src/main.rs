@@ -8,15 +8,19 @@ use serde::{Deserialize, Serialize};
 use std::sync::{OnceLock, mpsc};
 
 #[cfg(target_os = "macos")]
+use std::ffi::c_char;
+
+#[cfg(target_os = "macos")]
 use objc2::{
-    MainThreadMarker,
-    runtime::{AnyClass, AnyObject, ClassBuilder, Sel},
+    MainThreadMarker, msg_send,
+    rc::Retained,
+    runtime::{AnyClass, AnyObject, Bool, ClassBuilder, Sel},
     sel,
 };
 #[cfg(target_os = "macos")]
 use objc2_app_kit::{NSApplication, NSApplicationDelegateReply};
 #[cfg(target_os = "macos")]
-use objc2_foundation::{NSArray, NSString};
+use objc2_foundation::{NSArray, NSNotificationCenter, NSString, NSURL};
 
 const BRANCH_COLORS: [Color32; 6] = [
     Color32::from_rgb(255, 138, 101),
@@ -34,12 +38,59 @@ static OPEN_DOCUMENT_SENDER: OnceLock<mpsc::Sender<Result<PathBuf, String>>> = O
 static OPEN_FILES_DELEGATE_CLASS: OnceLock<&'static AnyClass> = OnceLock::new();
 
 #[cfg(target_os = "macos")]
+static CLASS_PATCHED: OnceLock<bool> = OnceLock::new();
+
+#[cfg(target_os = "macos")]
+unsafe extern "C" {
+    fn class_addMethod(
+        cls: *mut AnyClass,
+        name: Sel,
+        imp: *const std::ffi::c_void,
+        types: *const c_char,
+    ) -> bool;
+}
+
+#[cfg(target_os = "macos")]
+unsafe fn patch_delegate_class(cls: &AnyClass) {
+    let patch = |sel: Sel, types: &str, imp: *const std::ffi::c_void| {
+        let types = std::ffi::CString::new(types).unwrap();
+        let ok = class_addMethod(
+            cls as *const AnyClass as *mut AnyClass,
+            sel,
+            imp,
+            types.as_ptr(),
+        );
+        eprintln!("[PureMap] class_addMethod {:?}: {}", sel, ok);
+    };
+    // application:openFile: returns BOOL and takes (NSApplication, NSString).
+    patch(
+        sel!(application:openFile:),
+        concat!("B@:", "@@"),
+        application_open_file as unsafe extern "C-unwind" fn(_, _, _, _) -> Bool
+            as *const std::ffi::c_void,
+    );
+    // application:openFiles: / application:openURLs: return void and take
+    // (NSApplication, NSArray).
+    patch(
+        sel!(application:openFiles:),
+        concat!("v@:", "@@"),
+        application_open_files as unsafe extern "C-unwind" fn(_, _, _, _) as *const std::ffi::c_void,
+    );
+    patch(
+        sel!(application:openURLs:),
+        concat!("v@:", "@@"),
+        application_open_urls as unsafe extern "C-unwind" fn(_, _, _, _) as *const std::ffi::c_void,
+    );
+}
+
+#[cfg(target_os = "macos")]
 unsafe extern "C-unwind" fn application_open_files(
     _delegate: &AnyObject,
     _selector: Sel,
     application: &NSApplication,
     filenames: &NSArray<NSString>,
 ) {
+    eprintln!("[PureMap] ★ application:openFiles: 被调用, count={}", filenames.count());
     let mut succeeded = filenames.count() > 0;
     for index in 0..filenames.count() {
         let filename = filenames.objectAtIndex(index);
@@ -53,7 +104,42 @@ unsafe extern "C-unwind" fn application_open_files(
 }
 
 #[cfg(target_os = "macos")]
+unsafe extern "C-unwind" fn application_open_file(
+    _delegate: &AnyObject,
+    _selector: Sel,
+    _application: &NSApplication,
+    filename: &NSString,
+) -> Bool {
+    eprintln!("[PureMap] ★ application:openFile: 被调用, file={}", filename);
+    // application:openFile: reports success through its BOOL return value;
+    // replyToOpenOrPrint is only for application:openFiles:.
+    if send_open_document_request(Ok(PathBuf::from(filename.to_string()))) {
+        Bool::YES
+    } else {
+        Bool::NO
+    }
+}
+
+#[cfg(target_os = "macos")]
+unsafe extern "C-unwind" fn application_open_urls(
+    _delegate: &AnyObject,
+    _selector: Sel,
+    _application: &NSApplication,
+    urls: &NSArray<NSURL>,
+) {
+    eprintln!("[PureMap] ★ application:openURLs: 被调用, count={}", urls.count());
+    // application:openURLs: has no reply handshake; just forward the paths.
+    for index in 0..urls.count() {
+        let url = urls.objectAtIndex(index);
+        if let Some(path) = url.path() {
+            send_open_document_request(Ok(PathBuf::from(path.to_string())));
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
 fn send_open_document_request(request: Result<PathBuf, String>) -> bool {
+    eprintln!("[PureMap] send_open_document_request: {:?}", request);
     if let Some(sender) = OPEN_DOCUMENT_SENDER.get() {
         if sender.send(request).is_ok() {
             return true;
@@ -65,12 +151,20 @@ fn send_open_document_request(request: Result<PathBuf, String>) -> bool {
 
 #[cfg(target_os = "macos")]
 fn install_open_files_handler(main_thread: MainThreadMarker) {
+    eprintln!("[PureMap] install_open_files_handler 开始执行");
     let application = NSApplication::sharedApplication(main_thread);
     let delegate = application
         .delegate()
         .expect("winit has installed its NSApplication delegate");
     let delegate_object: &AnyObject = AsRef::<AnyObject>::as_ref(&*delegate);
     let delegate_class = delegate_object.class();
+    eprintln!("[PureMap] winit delegate 原始类: {:?}", delegate_class);
+
+    CLASS_PATCHED.get_or_init(|| {
+        unsafe { patch_delegate_class(delegate_class) };
+        true
+    });
+
     let open_files_class = OPEN_FILES_DELEGATE_CLASS.get_or_init(|| {
         let mut class_builder =
             ClassBuilder::new(c"PureMapWinitApplicationDelegate", delegate_class)
@@ -80,14 +174,74 @@ fn install_open_files_handler(main_thread: MainThreadMarker) {
                 sel!(application:openFiles:),
                 application_open_files as unsafe extern "C-unwind" fn(_, _, _, _),
             );
+            class_builder.add_method(
+                sel!(application:openFile:),
+                application_open_file as unsafe extern "C-unwind" fn(_, _, _, _) -> Bool,
+            );
+            class_builder.add_method(
+                sel!(application:openURLs:),
+                application_open_urls as unsafe extern "C-unwind" fn(_, _, _, _),
+            );
+        }
+        let new_class = class_builder.register();
+        eprintln!("[PureMap] 子类注册成功: {:?}", new_class);
+        new_class
+    });
+    if !std::ptr::eq(delegate_object.class(), *open_files_class) {
+        let previous_class = unsafe { AnyObject::set_class(delegate_object, open_files_class) };
+        eprintln!("[PureMap] set_class 完成: {:?} -> {:?}", previous_class, open_files_class);
+        assert_eq!(previous_class, delegate_class);
+    }
+}
+
+#[cfg(target_os = "macos")]
+static LAUNCH_OBSERVER_CLASS: OnceLock<&'static AnyClass> = OnceLock::new();
+
+#[cfg(target_os = "macos")]
+unsafe extern "C-unwind" fn application_will_finish_launching(
+    _observer: &AnyObject,
+    _selector: Sel,
+    _notification: &AnyObject,
+) {
+    eprintln!("[PureMap] WillFinishLaunching 到达，提前安装打开文件处理器");
+    // Finder delivers the open-documents Apple event while the app is still
+    // finishing launch, before eframe's creation closure runs. Installing
+    // the delegate patch here (NSApplicationWillFinishLaunchingNotification)
+    // makes it available in time for cold starts, not just warm starts.
+    if let Some(main_thread) = MainThreadMarker::new() {
+        install_open_files_handler(main_thread);
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn register_launch_observer() {
+    let observer_class = LAUNCH_OBSERVER_CLASS.get_or_init(|| {
+        let superclass = AnyClass::get(c"NSObject").expect("NSObject class exists");
+        let mut class_builder =
+            ClassBuilder::new(c"PureMapLaunchObserver", superclass)
+                .expect("PureMap's launch observer class is registered once");
+        unsafe {
+            class_builder.add_method(
+                sel!(puremapApplicationWillFinishLaunching:),
+                application_will_finish_launching as unsafe extern "C-unwind" fn(_, _, _),
+            );
         }
         class_builder.register()
     });
-    if !std::ptr::eq(delegate_object.class(), *open_files_class) {
-        // The subclass adds no ivars and retains Winit's delegate implementation.
-        let previous_class = unsafe { AnyObject::set_class(delegate_object, open_files_class) };
-        assert_eq!(previous_class, delegate_class);
+    let observer: Retained<AnyObject> = unsafe { msg_send![*observer_class, new] };
+    let name = NSString::from_str("NSApplicationWillFinishLaunchingNotification");
+    unsafe {
+        NSNotificationCenter::defaultCenter().addObserver_selector_name_object(
+            &observer,
+            sel!(puremapApplicationWillFinishLaunching:),
+            Some(&name),
+            None,
+        );
     }
+    // The notification center does not retain its observers; keep this one
+    // alive for the whole process lifetime.
+    std::mem::forget(observer);
+    eprintln!("[PureMap] 已注册 WillFinishLaunching 观察者");
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -2447,6 +2601,10 @@ fn main() -> eframe::Result<()> {
     OPEN_DOCUMENT_SENDER
         .set(open_document_sender)
         .expect("open-document handler sender is initialized once");
+    // Install the open-files delegate patch as soon as the app finishes
+    // launching starts, so a cold launch from Finder works too.
+    #[cfg(target_os = "macos")]
+    register_launch_observer();
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1280.0, 820.0])

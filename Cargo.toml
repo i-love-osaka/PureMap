@@ -21,4 +21,4 @@ uuid = { version = "1", features = ["v4"] }
 objc2-app-kit = { version = "0.3", features = ["NSApplication", "NSResponder"] }
 muda = "0.17"
 objc2 = "0.6"
-objc2-foundation = { version = "0.3", features = ["NSArray", "NSString"] }
+objc2-foundation = { version = "0.3", features = ["NSArray", "NSNotification", "NSString"] }
