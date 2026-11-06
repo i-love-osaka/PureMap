@@ -4,6 +4,19 @@ use eframe::egui::{
     self, Align2, Color32, FontId, Key, Modifiers, PointerButton, Pos2, Rect, Sense, Stroke, Vec2,
 };
 use serde::{Deserialize, Serialize};
+#[cfg(target_os = "macos")]
+use std::sync::{OnceLock, mpsc};
+
+#[cfg(target_os = "macos")]
+use objc2::{
+    MainThreadMarker,
+    runtime::{AnyClass, AnyObject, ClassBuilder, Sel},
+    sel,
+};
+#[cfg(target_os = "macos")]
+use objc2_app_kit::{NSApplication, NSApplicationDelegateReply};
+#[cfg(target_os = "macos")]
+use objc2_foundation::{NSArray, NSString};
 
 const BRANCH_COLORS: [Color32; 6] = [
     Color32::from_rgb(255, 138, 101),
@@ -13,6 +26,69 @@ const BRANCH_COLORS: [Color32; 6] = [
     Color32::from_rgb(174, 213, 129),
     Color32::from_rgb(255, 213, 79),
 ];
+
+#[cfg(target_os = "macos")]
+static OPEN_DOCUMENT_SENDER: OnceLock<mpsc::Sender<Result<PathBuf, String>>> = OnceLock::new();
+
+#[cfg(target_os = "macos")]
+static OPEN_FILES_DELEGATE_CLASS: OnceLock<&'static AnyClass> = OnceLock::new();
+
+#[cfg(target_os = "macos")]
+unsafe extern "C-unwind" fn application_open_files(
+    _delegate: &AnyObject,
+    _selector: Sel,
+    application: &NSApplication,
+    filenames: &NSArray<NSString>,
+) {
+    let mut succeeded = filenames.count() > 0;
+    for index in 0..filenames.count() {
+        let filename = filenames.objectAtIndex(index);
+        succeeded &= send_open_document_request(Ok(PathBuf::from(filename.to_string())));
+    }
+    application.replyToOpenOrPrint(if succeeded {
+        NSApplicationDelegateReply::Success
+    } else {
+        NSApplicationDelegateReply::Failure
+    });
+}
+
+#[cfg(target_os = "macos")]
+fn send_open_document_request(request: Result<PathBuf, String>) -> bool {
+    if let Some(sender) = OPEN_DOCUMENT_SENDER.get() {
+        if sender.send(request).is_ok() {
+            return true;
+        }
+    }
+    eprintln!("无法将 Finder 的打开文档事件传递给应用窗口");
+    false
+}
+
+#[cfg(target_os = "macos")]
+fn install_open_files_handler(main_thread: MainThreadMarker) {
+    let application = NSApplication::sharedApplication(main_thread);
+    let delegate = application
+        .delegate()
+        .expect("winit has installed its NSApplication delegate");
+    let delegate_object: &AnyObject = AsRef::<AnyObject>::as_ref(&*delegate);
+    let delegate_class = delegate_object.class();
+    let open_files_class = OPEN_FILES_DELEGATE_CLASS.get_or_init(|| {
+        let mut class_builder =
+            ClassBuilder::new(c"PureMapWinitApplicationDelegate", delegate_class)
+                .expect("PureMap's winit delegate subclass is registered once");
+        unsafe {
+            class_builder.add_method(
+                sel!(application:openFiles:),
+                application_open_files as unsafe extern "C-unwind" fn(_, _, _, _),
+            );
+        }
+        class_builder.register()
+    });
+    if !std::ptr::eq(delegate_object.class(), *open_files_class) {
+        // The subclass adds no ivars and retains Winit's delegate implementation.
+        let previous_class = unsafe { AnyObject::set_class(delegate_object, open_files_class) };
+        assert_eq!(previous_class, delegate_class);
+    }
+}
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -423,6 +499,8 @@ struct PureMapApp {
     about_open: bool,
     #[cfg(target_os = "macos")]
     native_menu: Option<muda::Menu>,
+    #[cfg(target_os = "macos")]
+    open_document_receiver: Option<mpsc::Receiver<Result<PathBuf, String>>>,
 }
 
 #[derive(Clone, Copy)]
@@ -782,6 +860,8 @@ impl Default for PureMapApp {
             about_open: false,
             #[cfg(target_os = "macos")]
             native_menu: None,
+            #[cfg(target_os = "macos")]
+            open_document_receiver: None,
         }
     }
 }
@@ -1214,6 +1294,10 @@ impl PureMapApp {
         else {
             return;
         };
+        self.open_document_path(path);
+    }
+
+    fn open_document_path(&mut self, path: PathBuf) {
         match fs::read_to_string(&path)
             .map_err(|error| error.to_string())
             .and_then(|text| {
@@ -1401,6 +1485,17 @@ impl eframe::App for PureMapApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         #[cfg(target_os = "macos")]
         self.handle_native_menu_events(ctx);
+        #[cfg(target_os = "macos")]
+        while let Some(path) = self
+            .open_document_receiver
+            .as_ref()
+            .and_then(|receiver| receiver.try_recv().ok())
+        {
+            match path {
+                Ok(path) => self.open_document_path(path),
+                Err(error) => self.status = format!("打开失败：{error}"),
+            }
+        }
         self.handle_shortcuts(ctx);
         let (canvas_bg, node_bg, text_color) = self.theme_colors(ctx);
         if self.document.theme == Theme::Dark
@@ -2336,7 +2431,22 @@ fn configure_fonts(ctx: &egui::Context) -> Result<(), std::io::Error> {
     Ok(())
 }
 
+fn puremap_path_from_args(args: impl IntoIterator<Item = std::ffi::OsString>) -> Option<PathBuf> {
+    args.into_iter().map(PathBuf::from).find(|path| {
+        path.extension()
+            .is_some_and(|extension| extension.to_string_lossy().eq_ignore_ascii_case("puremap"))
+    })
+}
+
+#[cfg(target_os = "macos")]
 fn main() -> eframe::Result<()> {
+    let open_path = puremap_path_from_args(std::env::args_os().skip(1));
+    #[cfg(target_os = "macos")]
+    let (open_document_sender, open_document_receiver) = mpsc::channel();
+    #[cfg(target_os = "macos")]
+    OPEN_DOCUMENT_SENDER
+        .set(open_document_sender)
+        .expect("open-document handler sender is initialized once");
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1280.0, 820.0])
@@ -2353,12 +2463,19 @@ fn main() -> eframe::Result<()> {
     eframe::run_native(
         "PureMap",
         options,
-        Box::new(|creation_context| {
+        Box::new(move |creation_context| {
             configure_fonts(&creation_context.egui_ctx)?;
             let mut app = PureMapApp::default();
+            if let Some(path) = open_path {
+                app.open_document_path(path);
+            }
             #[cfg(target_os = "macos")]
             {
+                let main_thread =
+                    MainThreadMarker::new().expect("application runs on the main thread");
+                install_open_files_handler(main_thread);
                 app.native_menu = Some(create_native_menu()?);
+                app.open_document_receiver = Some(open_document_receiver);
             }
             Ok(Box::new(app))
         }),
@@ -2556,6 +2673,21 @@ mod tests {
         let document: Document = serde_json::from_str(serialized).unwrap();
         document.validate().unwrap();
         assert_eq!(document.nodes["a"].parent_id.as_deref(), Some("root"));
+    }
+
+    #[test]
+    fn launch_arguments_select_a_puremap_document_path() {
+        let path = puremap_path_from_args([
+            std::ffi::OsString::from("-psn_0_12345"),
+            std::ffi::OsString::from("/maps/example.PUREMAP"),
+            std::ffi::OsString::from("/maps/ignored.json"),
+        ]);
+
+        assert_eq!(path, Some(PathBuf::from("/maps/example.PUREMAP")));
+        assert_eq!(
+            puremap_path_from_args([std::ffi::OsString::from("-psn_0_12345")]),
+            None
+        );
     }
 
     #[test]

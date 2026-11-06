@@ -6,7 +6,7 @@ APP_PATH=${1:-"$PROJECT_ROOT/PureMap.app"}
 CONTENTS_PATH="$APP_PATH/Contents"
 
 cd "$PROJECT_ROOT"
-cargo build --release
+cargo build --release --locked
 
 mkdir -p "$CONTENTS_PATH/MacOS"
 mkdir -p "$CONTENTS_PATH/Resources"

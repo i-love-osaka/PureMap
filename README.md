@@ -12,6 +12,7 @@ provides a radial canvas, keyboard-driven editing, and automatic layout.
 - Undo and redo (up to 200 actions)
 - Search highlighting and branch focus mode
 - Open/save `.puremap` and JSON files; import/export Markdown outlines
+- Open `.puremap` files by double-clicking them in Finder (macOS app bundle)
 - Light, dark, and automatic themes
 
 ## Run
@@ -39,9 +40,10 @@ sh packaging/macos/build-app.sh
 ```
 
 The script builds the release binary, assembles the app bundle with its icon,
-and applies an ad-hoc signature. The app is not notarized. On macOS, the menu
-bar is provided by AppKit and appears at the top of the screen, outside the
-app window. Chinese text uses a macOS system font.
+registers it with Launch Services for `.puremap` files, and applies an ad-hoc
+signature. The app is not notarized. On macOS, the menu bar is provided by
+AppKit and appears at the top of the screen, outside the app window. Chinese
+text uses a macOS system font.
 
 ## Shortcuts
 
