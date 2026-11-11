@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>com.apple.actool.compilation-results</key>
+	<dict>
+		<key>output-files</key>
+		<array>
+			<string>/Users/mr.ben/Desktop/Project/Rust/PureMap/PureMap.app/Contents/Resources/Assets.car</string>
+			<string>/Users/mr.ben/Desktop/Project/Rust/PureMap/PureMap.app/Contents/Resources/Icon.icns</string>
+			<string>/var/folders/6h/f_1xyxj16cbg6gsxlgfl31fm0000gn/T/puremap-icon-partial.plist</string>
+		</array>
+	</dict>
+</dict>
+</plist>

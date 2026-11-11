@@ -54,13 +54,19 @@ unsafe extern "C" {
 unsafe fn patch_delegate_class(cls: &AnyClass) {
     let patch = |sel: Sel, types: &str, imp: *const std::ffi::c_void| {
         let types = std::ffi::CString::new(types).unwrap();
-        let ok = class_addMethod(
-            cls as *const AnyClass as *mut AnyClass,
-            sel,
-            imp,
-            types.as_ptr(),
-        );
-        eprintln!("[PureMap] class_addMethod {:?}: {}", sel, ok);
+        // SAFETY: `cls` is the live winit delegate class and `imp`
+        // matches the type encoding passed alongside it. (Whether the
+        // method was added is not checked: the subclass registration
+        // in install_open_files_handler is the primary path, and the
+        // assert there catches a broken install.)
+        unsafe {
+            class_addMethod(
+                cls as *const AnyClass as *mut AnyClass,
+                sel,
+                imp,
+                types.as_ptr(),
+            )
+        };
     };
     // application:openFile: returns BOOL and takes (NSApplication, NSString).
     patch(
@@ -90,7 +96,6 @@ unsafe extern "C-unwind" fn application_open_files(
     application: &NSApplication,
     filenames: &NSArray<NSString>,
 ) {
-    eprintln!("[PureMap] ★ application:openFiles: 被调用, count={}", filenames.count());
     let mut succeeded = filenames.count() > 0;
     for index in 0..filenames.count() {
         let filename = filenames.objectAtIndex(index);
@@ -110,7 +115,6 @@ unsafe extern "C-unwind" fn application_open_file(
     _application: &NSApplication,
     filename: &NSString,
 ) -> Bool {
-    eprintln!("[PureMap] ★ application:openFile: 被调用, file={}", filename);
     // application:openFile: reports success through its BOOL return value;
     // replyToOpenOrPrint is only for application:openFiles:.
     if send_open_document_request(Ok(PathBuf::from(filename.to_string()))) {
@@ -127,7 +131,6 @@ unsafe extern "C-unwind" fn application_open_urls(
     _application: &NSApplication,
     urls: &NSArray<NSURL>,
 ) {
-    eprintln!("[PureMap] ★ application:openURLs: 被调用, count={}", urls.count());
     // application:openURLs: has no reply handshake; just forward the paths.
     for index in 0..urls.count() {
         let url = urls.objectAtIndex(index);
@@ -139,7 +142,6 @@ unsafe extern "C-unwind" fn application_open_urls(
 
 #[cfg(target_os = "macos")]
 fn send_open_document_request(request: Result<PathBuf, String>) -> bool {
-    eprintln!("[PureMap] send_open_document_request: {:?}", request);
     if let Some(sender) = OPEN_DOCUMENT_SENDER.get() {
         if sender.send(request).is_ok() {
             return true;
@@ -151,14 +153,12 @@ fn send_open_document_request(request: Result<PathBuf, String>) -> bool {
 
 #[cfg(target_os = "macos")]
 fn install_open_files_handler(main_thread: MainThreadMarker) {
-    eprintln!("[PureMap] install_open_files_handler 开始执行");
     let application = NSApplication::sharedApplication(main_thread);
     let delegate = application
         .delegate()
         .expect("winit has installed its NSApplication delegate");
     let delegate_object: &AnyObject = AsRef::<AnyObject>::as_ref(&*delegate);
     let delegate_class = delegate_object.class();
-    eprintln!("[PureMap] winit delegate 原始类: {:?}", delegate_class);
 
     CLASS_PATCHED.get_or_init(|| {
         unsafe { patch_delegate_class(delegate_class) };
@@ -184,12 +184,10 @@ fn install_open_files_handler(main_thread: MainThreadMarker) {
             );
         }
         let new_class = class_builder.register();
-        eprintln!("[PureMap] 子类注册成功: {:?}", new_class);
         new_class
     });
     if !std::ptr::eq(delegate_object.class(), *open_files_class) {
         let previous_class = unsafe { AnyObject::set_class(delegate_object, open_files_class) };
-        eprintln!("[PureMap] set_class 完成: {:?} -> {:?}", previous_class, open_files_class);
         assert_eq!(previous_class, delegate_class);
     }
 }
@@ -203,7 +201,6 @@ unsafe extern "C-unwind" fn application_will_finish_launching(
     _selector: Sel,
     _notification: &AnyObject,
 ) {
-    eprintln!("[PureMap] WillFinishLaunching 到达，提前安装打开文件处理器");
     // Finder delivers the open-documents Apple event while the app is still
     // finishing launch, before eframe's creation closure runs. Installing
     // the delegate patch here (NSApplicationWillFinishLaunchingNotification)
@@ -241,7 +238,6 @@ fn register_launch_observer() {
     // The notification center does not retain its observers; keep this one
     // alive for the whole process lifetime.
     std::mem::forget(observer);
-    eprintln!("[PureMap] 已注册 WillFinishLaunching 观察者");
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -581,7 +577,9 @@ impl Document {
         Color32::from_rgb(91, 145, 245)
     }
 
-    fn visible_ids(&self) -> Vec<String> {
+    /// Ids of the subtree rooted at `start`, in paint order,
+    /// honouring collapsed nodes.
+    fn subtree_ids(&self, start: &str) -> Vec<String> {
         fn visit(doc: &Document, id: &str, out: &mut Vec<String>) {
             let Some(node) = doc.nodes.get(id) else {
                 return;
@@ -594,8 +592,12 @@ impl Document {
             }
         }
         let mut result = Vec::new();
-        visit(self, &self.root_id, &mut result);
+        visit(self, start, &mut result);
         result
+    }
+
+    fn visible_ids(&self) -> Vec<String> {
+        self.subtree_ids(&self.root_id)
     }
 
     fn search_matches(&self, query: &str) -> Vec<String> {
@@ -651,6 +653,9 @@ struct PureMapApp {
     search_open: bool,
     search_focus_pending: bool,
     about_open: bool,
+    /// The dark/light state last pushed via `ctx.set_visuals`, so the
+    /// style is only re-applied when it actually changes.
+    visuals_dark: Option<bool>,
     #[cfg(target_os = "macos")]
     native_menu: Option<muda::Menu>,
     #[cfg(target_os = "macos")]
@@ -1012,6 +1017,7 @@ impl Default for PureMapApp {
             search_open: false,
             search_focus_pending: false,
             about_open: false,
+            visuals_dark: None,
             #[cfg(target_os = "macos")]
             native_menu: None,
             #[cfg(target_os = "macos")]
@@ -1652,12 +1658,17 @@ impl eframe::App for PureMapApp {
         }
         self.handle_shortcuts(ctx);
         let (canvas_bg, node_bg, text_color) = self.theme_colors(ctx);
-        if self.document.theme == Theme::Dark
-            || (self.document.theme == Theme::Auto && ctx.style().visuals.dark_mode)
-        {
-            ctx.set_visuals(egui::Visuals::dark());
-        } else {
-            ctx.set_visuals(egui::Visuals::light());
+        // Only push the visuals when the effective dark/light state
+        // actually flips — re-applying them every frame is pure waste.
+        let dark = self.document.theme == Theme::Dark
+            || (self.document.theme == Theme::Auto && ctx.style().visuals.dark_mode);
+        if self.visuals_dark != Some(dark) {
+            self.visuals_dark = Some(dark);
+            if dark {
+                ctx.set_visuals(egui::Visuals::dark());
+            } else {
+                ctx.set_visuals(egui::Visuals::light());
+            }
         }
 
         #[cfg(not(target_os = "macos"))]
@@ -1946,23 +1957,13 @@ impl eframe::App for PureMapApp {
                     + Vec2::new(self.document.canvas.offset_x, self.document.canvas.offset_y);
                 let visible = self.document.visible_ids();
                 let draw_ids: Vec<String> = if let Some(focus) = &self.focus_id {
-                    let mut subtree = Vec::new();
-                    fn append(doc: &Document, id: &str, ids: &mut Vec<String>) {
-                        if let Some(node) = doc.nodes.get(id) {
-                            ids.push(id.to_owned());
-                            if !node.collapsed {
-                                for child in &node.children {
-                                    append(doc, child, ids);
-                                }
-                            }
-                        }
-                    }
-                    append(&self.document, focus, &mut subtree);
-                    subtree
+                    self.document.subtree_ids(focus)
                 } else {
                     visible
                 };
-                let positions: BTreeMap<String, (Pos2, Rect)> = draw_ids
+                // Per-frame node geometry + branch color, computed once
+                // and shared by the connection pass and the body pass.
+                let positions: BTreeMap<String, (Pos2, Rect, Color32)> = draw_ids
                     .iter()
                     .filter_map(|id| {
                         self.document.nodes.get(id).map(|node| {
@@ -1974,7 +1975,8 @@ impl eframe::App for PureMapApp {
                             let height = (if depth == 0 { 44.0 } else { 36.0 })
                                 * self.document.canvas.zoom.clamp(0.75, 1.4);
                             let node_rect = Rect::from_center_size(point, Vec2::new(width, height));
-                            (id.clone(), (point, node_rect))
+                            let color = self.document.branch_color(id);
+                            (id.clone(), (point, node_rect, color))
                         })
                     })
                     .collect();
@@ -1984,12 +1986,16 @@ impl eframe::App for PureMapApp {
                         continue;
                     };
                     if let Some(parent_id) = &node.parent_id
-                        && let (Some((from_center, from_rect)), Some((to_center, to_rect))) =
+                        && let (Some((from_center, from_rect, _)), Some((to_center, to_rect, color))) =
                             (positions.get(parent_id), positions.get(id))
                     {
+                        // Cull connections that cannot cross the viewport.
+                        if !from_rect.union(*to_rect).intersects(rect) {
+                            continue;
+                        }
                         let (from, to) =
                             connection_endpoints(*from_rect, *from_center, *to_rect, *to_center);
-                        let color = self.document.branch_color(id);
+                        let color = *color;
                         let control_distance = (to.x - from.x).abs() * 0.48;
                         let direction = if to.x >= from.x { 1.0 } else { -1.0 };
                         let control1 = Pos2::new(from.x + direction * control_distance, from.y);
@@ -2008,23 +2014,25 @@ impl eframe::App for PureMapApp {
                     }
                 }
 
+                // Hoisted out of the per-node loop: the search needle
+                // used to be re-allocated for every node, every frame.
+                let searching = !self.search.trim().is_empty();
+                let search_lower = self.search.to_lowercase();
                 for id in &draw_ids {
-                    let Some((point, node_rect)) = positions.get(id).copied() else {
+                    let Some((point, node_rect, color)) = positions.get(id).copied() else {
                         continue;
                     };
-                    let Some(node) = self.document.nodes.get(id).cloned() else {
-                        continue;
-                    };
+                    // Cull BEFORE cloning the node: off-screen nodes
+                    // used to pay a full clone every frame for nothing.
                     if !node_rect.intersects(rect) {
                         continue;
                     }
-                    let color = self.document.branch_color(id);
+                    let Some(node) = self.document.nodes.get(id).cloned() else {
+                        continue;
+                    };
                     let selected = *id == self.selected_id;
-                    let matching = !self.search.trim().is_empty()
-                        && node
-                            .text
-                            .to_lowercase()
-                            .contains(&self.search.to_lowercase());
+                    let matching = searching
+                        && node.text.to_lowercase().contains(&search_lower);
                     let background = if node.marked_deleted {
                         Color32::from_gray(if ui.visuals().dark_mode { 48 } else { 228 })
                     } else if node.parent_id.is_none() {
@@ -2171,7 +2179,7 @@ impl eframe::App for PureMapApp {
                 }
 
                 if let Some(id) = self.editing_id.clone()
-                    && let Some((_, edit_rect)) = positions.get(&id)
+                    && let Some((_, edit_rect, _)) = positions.get(&id)
                 {
                     let mut edit_rect = *edit_rect;
                     edit_rect = edit_rect.shrink2(Vec2::new(8.0, 7.0));
@@ -2682,10 +2690,13 @@ fn main() -> eframe::Result<()> {
             .with_min_inner_size([760.0, 500.0])
             .with_title("PureMap")
             .with_icon(
-                eframe::icon_data::from_png_bytes(include_bytes!(
-                    "../packaging/macos/PureMap.iconset/icon_128x128@2x.png"
-                ))
-                .expect("embedded PureMap icon is a valid PNG"),
+                // The icon the app sets for itself at runtime (Dock
+                // while running, task switcher): macOS does NOT mask
+                // app-provided images, so this must be the pre-rounded
+                // artwork with transparent corners — deliberately a
+                // separate file from the full-bleed bundle iconset.
+                eframe::icon_data::from_png_bytes(include_bytes!("../assets/icon.png"))
+                    .expect("embedded PureMap icon is a valid PNG"),
             ),
         ..Default::default()
     };
