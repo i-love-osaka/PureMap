@@ -9,7 +9,10 @@
       <stop offset="1" stop-color="#eaf0ff"/>
     </linearGradient>
   </defs>
-  <rect x="36" y="36" width="952" height="952" rx="220" fill="url(#background)"/>
+  <!-- Full-bleed square: the system applies the squircle mask.
+       (The previous inset/rounded design got shrunk onto a light
+       plate by newer macOS versions when the app was not running.) -->
+  <rect x="0" y="0" width="1024" height="1024" fill="url(#background)"/>
   <g fill="none" stroke="#fff" stroke-linecap="round" stroke-width="34" opacity=".8">
     <path d="M512 512 C420 485 356 370 268 270"/>
     <path d="M512 512 C410 520 340 520 240 520"/>

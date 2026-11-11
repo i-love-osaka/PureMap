@@ -2309,7 +2309,7 @@ impl eframe::App for PureMapApp {
                 .id(egui::Id::new("about_window"))
                 .anchor(Align2::CENTER_CENTER, Vec2::ZERO)
                 .title_bar(false)
-                .fixed_size(Vec2::new(440.0, 300.0))
+                .fixed_size(Vec2::new(440.0, 380.0))
                 .collapsible(false)
                 .resizable(false)
                 .open(&mut open)
@@ -2359,6 +2359,8 @@ impl eframe::App for PureMapApp {
                         egui::Layout::top_down(egui::Align::Center)
                             .with_main_align(egui::Align::Center),
                         |ui| {
+                            about_icon(ui);
+                            ui.add_space(14.0);
                             ui.label(egui::RichText::new("PureMap").size(22.0));
                             ui.add_space(6.0);
                             ui.label(
@@ -2366,7 +2368,22 @@ impl eframe::App for PureMapApp {
                                     .size(16.0),
                             );
                             ui.add_space(12.0);
+                            ui.label(
+                                egui::RichText::new("简单、纯粹、离线的思维导图工具。")
+                                    .size(13.5)
+                                    .weak(),
+                            );
+                            ui.add_space(4.0);
+                            ui.label(
+                                egui::RichText::new(
+                                    "放射状画布 · 键盘编辑 · 自动布局\nMarkdown 大纲导入导出 · 离线使用",
+                                )
+                                .size(12.5)
+                                .weak(),
+                            );
+                            ui.add_space(16.0);
                             ui.label(egui::RichText::new("By Mr.Ben").size(16.0));
+                            ui.add_space(2.0);
                             ui.hyperlink_to(
                                 egui::RichText::new("https://mrben.net").size(16.0),
                                 "https://mrben.net",
@@ -2397,6 +2414,60 @@ impl eframe::App for PureMapApp {
 }
 
 #[cfg(target_os = "macos")]
+/// Miniature of the app icon, painted for the About window (same
+/// idea as SmartReName's): blue-violet rounded square, white center
+/// node, six curved branches to six white nodes.
+fn about_icon(ui: &mut egui::Ui) {
+    let (rect, _) = ui.allocate_exact_size(egui::Vec2::splat(88.0), egui::Sense::hover());
+    let p = ui.painter();
+    p.rect_filled(
+        rect,
+        egui::CornerRadius::same(20),
+        egui::Color32::from_rgb(0x5F, 0x74, 0xE6),
+    );
+    let center = rect.center();
+    // Soft halo behind the root node, like the SVG icon.
+    p.circle_filled(
+        center,
+        21.0,
+        egui::Color32::from_rgba_unmultiplied(255, 255, 255, 46),
+    );
+    let white = egui::Color32::from_rgba_unmultiplied(255, 255, 255, 205);
+    let nodes = [
+        egui::Vec2::new(-21.0, -21.0),
+        egui::Vec2::new(-23.0, 1.0),
+        egui::Vec2::new(-20.0, 21.0),
+        egui::Vec2::new(21.0, -21.0),
+        egui::Vec2::new(24.0, 1.0),
+        egui::Vec2::new(20.0, 21.0),
+    ];
+    for n in nodes {
+        let to = center + n;
+        // Cubic bezier from the center to the node, bowed like the
+        // icon's branches; sampled into a polyline.
+        let cp1 = center + egui::Vec2::new(n.x * 0.45, n.y * 0.05);
+        let cp2 = to + egui::Vec2::new(-n.x * 0.05, -n.y * 0.45);
+        let pts: Vec<egui::Pos2> = (0..=20)
+            .map(|i| {
+                let t = i as f32 / 20.0;
+                let u = 1.0 - t;
+                let a = u * u * u;
+                let b = 3.0 * u * u * t;
+                let c = 3.0 * u * t * t;
+                let d = t * t * t;
+                egui::Pos2::new(
+                    a * center.x + b * cp1.x + c * cp2.x + d * to.x,
+                    a * center.y + b * cp1.y + c * cp2.y + d * to.y,
+                )
+            })
+            .collect();
+        p.add(egui::Shape::line(pts, egui::Stroke::new(3.0_f32, white)));
+        p.circle_filled(to, 4.6, egui::Color32::WHITE);
+    }
+    p.circle_filled(center, 13.5, egui::Color32::WHITE);
+    p.circle_filled(center, 5.0, egui::Color32::from_rgb(0x63, 0x80, 0xE8));
+}
+
 fn add_native_menu_command(
     submenu: &muda::Submenu,
     id: &str,
